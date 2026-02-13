@@ -87,15 +87,16 @@ type Address struct {
 
 // Competitor represents a golfer in the competition.
 type Competitor struct {
-	ID       string          `json:"id"`
-	UID      string          `json:"uid"`
-	Status   CompetitorStatus `json:"status"`
-	Score    string          `json:"score"`
-	Athlete  Athlete         `json:"athlete"`
-	SortOrder int            `json:"sortOrder"`
-	Statistics []Statistic   `json:"statistics"`
-	Linescores []Linescore   `json:"linescores"`
-	Movement   int           `json:"movement"`
+	ID         string           `json:"id"`
+	UID        string           `json:"uid"`
+	Status     *CompetitorStatus `json:"status,omitempty"`
+	Score      string           `json:"score"`
+	Athlete    Athlete          `json:"athlete"`
+	Order      int              `json:"order"`
+	SortOrder  int              `json:"sortOrder"`
+	Statistics []Statistic      `json:"statistics"`
+	Linescores []Linescore      `json:"linescores"`
+	Movement   int              `json:"movement"`
 }
 
 // CompetitorStatus describes cut status, etc.
@@ -162,8 +163,18 @@ func (f FlexString) String() string {
 
 // Linescore represents one round score.
 type Linescore struct {
-	Period int        `json:"period"`
-	Value  FlexString `json:"value"`
+	Period       int              `json:"period"`
+	Value        FlexString       `json:"value"`
+	DisplayValue string           `json:"displayValue"`
+	Linescores   []HoleLinescore  `json:"linescores"`
+	Statistics   json.RawMessage  `json:"statistics,omitempty"`
+}
+
+// HoleLinescore represents a single hole score within a round.
+type HoleLinescore struct {
+	Value        FlexString `json:"value"`
+	DisplayValue string     `json:"displayValue"`
+	Period       int        `json:"period"`
 }
 
 // LeaderboardEntry is a simplified view of a competitor for display.

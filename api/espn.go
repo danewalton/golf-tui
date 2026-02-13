@@ -117,12 +117,24 @@ func GetLeaderboard(data *models.ESPNResponse) []models.LeaderboardEntry {
 
 	comp := event.Competitions[0]
 
-	// Sort competitors by sort order
+	// Sort competitors by order (ESPN provides them pre-sorted, but use Order/SortOrder as fallback)
 	competitors := make([]models.Competitor, len(comp.Competitors))
 	copy(competitors, comp.Competitors)
 	sort.Slice(competitors, func(i, j int) bool {
-		return competitors[i].SortOrder < competitors[j].SortOrder
+		oi, oj := competitors[i].Order, competitors[j].Order
+		if oi == 0 {
+			oi = competitors[i].SortOrder
+		}
+		if oj == 0 {
+			oj = competitors[j].SortOrder
+		}
+		if oi != oj {
+			return oi < oj
+		}
+		return i < j // stable fallback
 	})
+
+	currentRound := comp.Status.Period
 
 	for i, c := range competitors {
 		entry := models.LeaderboardEntry{
@@ -140,34 +152,68 @@ func GetLeaderboard(data *models.ESPNResponse) []models.LeaderboardEntry {
 				break
 			}
 		}
-		if entry.ToPar == "" && len(c.Statistics) > 0 {
-			entry.ToPar = c.Statistics[0].DisplayValue
-		}
 		if entry.ToPar == "" {
-			entry.ToPar = c.Score
+			// Use score as to-par (ESPN returns e.g. "-15")
+			entry.ToPar = models.FormatToPar(c.Score)
 		}
 
-		// Extract round scores from linescores
+		// Extract round scores and thru from linescores
 		for _, ls := range c.Linescores {
+			// Use displayValue for round score (e.g. "-7") if available,
+			// fall back to value (stroke total e.g. "65")
+			roundScore := ls.DisplayValue
+			if roundScore == "" && ls.Value.String() != "" {
+				roundScore = ls.Value.String()
+			}
+
 			switch ls.Period {
 			case 1:
-				entry.Round1 = ls.Value.String()
+				entry.Round1 = roundScore
 			case 2:
-				entry.Round2 = ls.Value.String()
+				entry.Round2 = roundScore
 			case 3:
-				entry.Round3 = ls.Value.String()
+				entry.Round3 = roundScore
 			case 4:
-				entry.Round4 = ls.Value.String()
+				entry.Round4 = roundScore
+			}
+
+			// Derive "thru" from the current round's hole-by-hole linescores
+			if ls.Period == currentRound {
+				holesPlayed := len(ls.Linescores)
+				if holesPlayed == 18 {
+					entry.Thru = "F"
+				} else if holesPlayed > 0 {
+					entry.Thru = fmt.Sprintf("%d", holesPlayed)
+				}
 			}
 		}
 
-		// Current round status
-		entry.Thru = c.Status.DisplayValue
-		if c.Status.Type.Description != "" {
-			entry.Status = c.Status.Type.Description
+		// If no thru derived yet, check if they have all rounds completed
+		if entry.Thru == "" {
+			// Check if the most recent round with data is complete
+			for ri := len(c.Linescores) - 1; ri >= 0; ri-- {
+				ls := c.Linescores[ri]
+				if len(ls.Linescores) == 18 {
+					entry.Thru = "F"
+					break
+				} else if len(ls.Linescores) > 0 {
+					entry.Thru = fmt.Sprintf("%d", len(ls.Linescores))
+					break
+				}
+			}
 		}
 
-		entry.CurrentRound = fmt.Sprintf("R%d", c.Status.Period)
+		entry.CurrentRound = fmt.Sprintf("R%d", currentRound)
+
+		// Status from competitor if available
+		if c.Status != nil {
+			if c.Status.DisplayValue != "" {
+				entry.Status = c.Status.DisplayValue
+			}
+			if c.Status.Type.Description != "" {
+				entry.Status = c.Status.Type.Description
+			}
+		}
 
 		entries = append(entries, entry)
 	}
