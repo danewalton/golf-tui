@@ -1,0 +1,176 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"time"
+
+	"github.com/danewalton/sports-tui/models"
+)
+
+const (
+	espnGolfScoreboardURL = "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard"
+)
+
+// Client handles API requests to ESPN.
+type Client struct {
+	httpClient *http.Client
+}
+
+// NewClient creates a new API client.
+func NewClient() *Client {
+	return &Client{
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+	}
+}
+
+// FetchScoreboard retrieves the current PGA Tour scoreboard from ESPN.
+func (c *Client) FetchScoreboard() (*models.ESPNResponse, error) {
+	resp, err := c.httpClient.Get(espnGolfScoreboardURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch scoreboard: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var data models.ESPNResponse
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &data, nil
+}
+
+// GetTournamentInfo extracts tournament metadata from the API response.
+func GetTournamentInfo(data *models.ESPNResponse) models.TournamentInfo {
+	info := models.TournamentInfo{
+		Name:       "No Active Tournament",
+		Venue:      "",
+		Location:   "",
+		Status:     "Unknown",
+		Round:      0,
+		EventState: "unknown",
+	}
+
+	if len(data.Events) == 0 {
+		return info
+	}
+
+	event := data.Events[0]
+	info.Name = event.Name
+	info.EventState = event.Status.Type.State
+
+	switch event.Status.Type.State {
+	case "pre":
+		info.Status = "Upcoming"
+	case "in":
+		info.Status = "In Progress"
+	case "post":
+		info.Status = "Completed"
+	default:
+		info.Status = event.Status.Type.Description
+	}
+
+	if len(event.Competitions) > 0 {
+		comp := event.Competitions[0]
+		info.Round = comp.Status.Period
+
+		if comp.Venue.FullName != "" {
+			info.Venue = comp.Venue.FullName
+		}
+		if comp.Venue.Address.City != "" {
+			info.Location = comp.Venue.Address.City
+			if comp.Venue.Address.State != "" {
+				info.Location += ", " + comp.Venue.Address.State
+			}
+		}
+	}
+
+	return info
+}
+
+// GetLeaderboard extracts and sorts the leaderboard from the API response.
+func GetLeaderboard(data *models.ESPNResponse) []models.LeaderboardEntry {
+	entries := []models.LeaderboardEntry{}
+
+	if len(data.Events) == 0 {
+		return entries
+	}
+
+	event := data.Events[0]
+	if len(event.Competitions) == 0 {
+		return entries
+	}
+
+	comp := event.Competitions[0]
+
+	// Sort competitors by sort order
+	competitors := make([]models.Competitor, len(comp.Competitors))
+	copy(competitors, comp.Competitors)
+	sort.Slice(competitors, func(i, j int) bool {
+		return competitors[i].SortOrder < competitors[j].SortOrder
+	})
+
+	for i, c := range competitors {
+		entry := models.LeaderboardEntry{
+			Position:   i + 1,
+			Name:       c.Athlete.DisplayName,
+			Country:    c.Athlete.Flag.Alt,
+			TotalScore: c.Score,
+			Movement:   models.FormatMovement(c.Movement),
+		}
+
+		// Extract to-par from statistics
+		for _, stat := range c.Statistics {
+			if stat.Name == "scoreToPar" || stat.Name == "toPar" {
+				entry.ToPar = models.FormatToPar(stat.DisplayValue)
+				break
+			}
+		}
+		if entry.ToPar == "" && len(c.Statistics) > 0 {
+			entry.ToPar = c.Statistics[0].DisplayValue
+		}
+		if entry.ToPar == "" {
+			entry.ToPar = c.Score
+		}
+
+		// Extract round scores from linescores
+		for _, ls := range c.Linescores {
+			switch ls.Period {
+			case 1:
+				entry.Round1 = ls.Value.String()
+			case 2:
+				entry.Round2 = ls.Value.String()
+			case 3:
+				entry.Round3 = ls.Value.String()
+			case 4:
+				entry.Round4 = ls.Value.String()
+			}
+		}
+
+		// Current round status
+		entry.Thru = c.Status.DisplayValue
+		if c.Status.Type.Description != "" {
+			entry.Status = c.Status.Type.Description
+		}
+
+		entry.CurrentRound = fmt.Sprintf("R%d", c.Status.Period)
+
+		entries = append(entries, entry)
+	}
+
+	return entries
+}
