@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,25 +19,29 @@ const (
 
 // App holds all TUI components and state.
 type App struct {
-	app       *tview.Application
-	pages     *tview.Pages
-	table     *tview.Table
-	header    *tview.TextView
-	footer    *tview.TextView
-	layout    *tview.Flex
-	client    *api.Client
-	mu        sync.Mutex
-	info      models.TournamentInfo
-	entries   []models.LeaderboardEntry
-	lastFetch time.Time
-	err       error
+	app        *tview.Application
+	pages      *tview.Pages
+	table      *tview.Table
+	header     *tview.TextView
+	footer     *tview.TextView
+	layout     *tview.Flex
+	client     *api.Client
+	mu         sync.Mutex
+	info       models.TournamentInfo
+	entries    []models.LeaderboardEntry
+	lastFetch  time.Time
+	err        error
+	expanded   map[int]bool // which entry indices are expanded (scorecard visible)
+	rowToEntry map[int]int  // table row -> entry index (-1 for scorecard rows)
 }
 
 // NewApp creates a new TUI application.
 func NewApp() *App {
 	a := &App{
-		app:    tview.NewApplication(),
-		client: api.NewClient(),
+		app:        tview.NewApplication(),
+		client:     api.NewClient(),
+		expanded:   make(map[int]bool),
+		rowToEntry: make(map[int]int),
 	}
 	a.buildUI()
 	return a
@@ -64,6 +70,27 @@ func (a *App) buildUI() {
 		SetTitle(" Leaderboard ").
 		SetTitleColor(tcell.ColorGreen).
 		SetBorderPadding(0, 0, 1, 1)
+
+	// Toggle scorecard on Enter
+	a.table.SetSelectedFunc(func(row, column int) {
+		entryIdx, ok := a.rowToEntry[row]
+		if !ok || entryIdx < 0 {
+			return
+		}
+		if a.expanded[entryIdx] {
+			delete(a.expanded, entryIdx)
+		} else {
+			a.expanded[entryIdx] = true
+		}
+		a.renderTable()
+		// Re-select the player row after re-render
+		for r, idx := range a.rowToEntry {
+			if idx == entryIdx {
+				a.table.Select(r, 0)
+				break
+			}
+		}
+	})
 
 	// Footer - controls & status
 	a.footer = tview.NewTextView().
@@ -200,6 +227,7 @@ func (a *App) renderTable() {
 	a.mu.Unlock()
 
 	a.table.Clear()
+	a.rowToEntry = make(map[int]int)
 
 	if len(entries) == 0 {
 		a.table.SetCell(0, 0, tview.NewTableCell("[yellow]No leaderboard data available. The tournament may not have started yet.").
@@ -217,6 +245,7 @@ func (a *App) renderTable() {
 		headers = append(headers, "R1", "R2", "R3", "R4")
 	}
 	headers = append(headers, "THRU", "MOV")
+	numCols := len(headers)
 
 	for col, h := range headers {
 		cell := tview.NewTableCell(h).
@@ -230,9 +259,10 @@ func (a *App) renderTable() {
 		a.table.SetCell(0, col, cell)
 	}
 
-	// Data rows
-	for row, entry := range entries {
-		r := row + 1
+	// Data rows (with interleaved scorecard rows for expanded players)
+	tableRow := 1
+	for i, entry := range entries {
+		a.rowToEntry[tableRow] = i
 		col := 0
 
 		// Position
@@ -242,19 +272,25 @@ func (a *App) renderTable() {
 		} else if entry.Position <= 10 {
 			posColor = tcell.ColorLightGreen
 		}
-		a.table.SetCell(r, col, tview.NewTableCell(fmt.Sprintf("%d", entry.Position)).
+		a.table.SetCell(tableRow, col, tview.NewTableCell(fmt.Sprintf("%d", entry.Position)).
 			SetTextColor(posColor).
 			SetAlign(tview.AlignCenter))
 		col++
 
-		// Player name
-		a.table.SetCell(r, col, tview.NewTableCell(entry.Name).
+		// Player name (add indicator if expandable)
+		nameText := entry.Name
+		if a.expanded[i] {
+			nameText = "▾ " + nameText
+		} else if len(entry.RoundScores) > 0 {
+			nameText = "▸ " + nameText
+		}
+		a.table.SetCell(tableRow, col, tview.NewTableCell(nameText).
 			SetTextColor(tcell.ColorWhite).
 			SetExpansion(1))
 		col++
 
 		// Country
-		a.table.SetCell(r, col, tview.NewTableCell(entry.Country).
+		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.Country).
 			SetTextColor(tcell.ColorLightGray).
 			SetAlign(tview.AlignCenter))
 		col++
@@ -268,13 +304,13 @@ func (a *App) renderTable() {
 		} else if len(entry.ToPar) > 0 && entry.ToPar[0] == '+' {
 			toParColor = tcell.ColorDeepSkyBlue
 		}
-		a.table.SetCell(r, col, tview.NewTableCell(entry.ToPar).
+		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.ToPar).
 			SetTextColor(toParColor).
 			SetAlign(tview.AlignCenter))
 		col++
 
 		// Total score
-		a.table.SetCell(r, col, tview.NewTableCell(entry.TotalScore).
+		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.TotalScore).
 			SetTextColor(tcell.ColorWhite).
 			SetAlign(tview.AlignCenter))
 		col++
@@ -286,7 +322,7 @@ func (a *App) renderTable() {
 				if rs == "" {
 					rs = "-"
 				}
-				a.table.SetCell(r, col, tview.NewTableCell(rs).
+				a.table.SetCell(tableRow, col, tview.NewTableCell(rs).
 					SetTextColor(tcell.ColorLightGray).
 					SetAlign(tview.AlignCenter))
 				col++
@@ -298,29 +334,110 @@ func (a *App) renderTable() {
 		if thru == "" {
 			thru = "-"
 		}
-		a.table.SetCell(r, col, tview.NewTableCell(thru).
+		a.table.SetCell(tableRow, col, tview.NewTableCell(thru).
 			SetTextColor(tcell.ColorLightYellow).
 			SetAlign(tview.AlignCenter))
 		col++
 
 		// Movement
 		movColor := tcell.ColorWhite
-		if len(entry.Movement) > 0 {
-			if entry.Movement[0] == 0xe2 { // ▲ UTF-8 start byte
-				movColor = tcell.ColorGreen
-			} else if entry.Movement == "-" {
-				movColor = tcell.ColorGray
-			}
-		}
-		// Better detection
 		if len(entry.Movement) >= 3 && entry.Movement[:3] == "▲" {
 			movColor = tcell.ColorGreen
 		} else if len(entry.Movement) >= 3 && entry.Movement[:3] == "▼" {
 			movColor = tcell.ColorRed
+		} else if entry.Movement == "-" {
+			movColor = tcell.ColorGray
 		}
-		a.table.SetCell(r, col, tview.NewTableCell(entry.Movement).
+		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.Movement).
 			SetTextColor(movColor).
 			SetAlign(tview.AlignCenter))
+
+		tableRow++
+
+		// Render scorecard rows if this player is expanded
+		if a.expanded[i] && len(entry.RoundScores) > 0 {
+			// Hole header row
+			a.rowToEntry[tableRow] = -1
+			holeHeader := "        "
+			for h := 1; h <= 9; h++ {
+				holeHeader += fmt.Sprintf("%4d", h)
+			}
+			holeHeader += "   OUT"
+			for h := 10; h <= 18; h++ {
+				holeHeader += fmt.Sprintf("%4d", h)
+			}
+			holeHeader += "    IN  TOT"
+			a.table.SetCell(tableRow, 0, tview.NewTableCell("").SetSelectable(false))
+			a.table.SetCell(tableRow, 1, tview.NewTableCell(holeHeader).
+				SetTextColor(tcell.ColorDarkCyan).
+				SetExpansion(1).
+				SetSelectable(false))
+			for c := 2; c < numCols; c++ {
+				a.table.SetCell(tableRow, c, tview.NewTableCell("").SetSelectable(false))
+			}
+			tableRow++
+
+			// One row per round
+			for _, sc := range entry.RoundScores {
+				a.rowToEntry[tableRow] = -1
+				line := fmt.Sprintf("    R%-3d", sc.Round)
+				front9 := 0
+				frontCount := 0
+				for h := 0; h < 9; h++ {
+					line += formatHoleScore(sc.Scores[h], sc.ScoreToPar[h])
+					if v, err := strconv.Atoi(sc.Scores[h]); err == nil {
+						front9 += v
+						frontCount++
+					}
+				}
+				if frontCount == 9 {
+					line += fmt.Sprintf("  %4d", front9)
+				} else {
+					line += "     -"
+				}
+				back9 := 0
+				backCount := 0
+				for h := 9; h < 18; h++ {
+					line += formatHoleScore(sc.Scores[h], sc.ScoreToPar[h])
+					if v, err := strconv.Atoi(sc.Scores[h]); err == nil {
+						back9 += v
+						backCount++
+					}
+				}
+				if backCount == 9 {
+					line += fmt.Sprintf("  %4d", back9)
+				} else {
+					line += "     -"
+				}
+				total := sc.Total
+				if total == "" {
+					total = "-"
+				}
+				line += fmt.Sprintf("  %3s", total)
+
+				a.table.SetCell(tableRow, 0, tview.NewTableCell("").SetSelectable(false))
+				a.table.SetCell(tableRow, 1, tview.NewTableCell(line).
+					SetTextColor(tcell.ColorLightSlateGray).
+					SetExpansion(1).
+					SetSelectable(false))
+				for c := 2; c < numCols; c++ {
+					a.table.SetCell(tableRow, c, tview.NewTableCell("").SetSelectable(false))
+				}
+				tableRow++
+			}
+
+			// Legend row
+			a.rowToEntry[tableRow] = -1
+			legend := "        [red]◎[-] Eagle   [red]○[-] Birdie   · Par   [navy]□[-] Bogey   [navy]■[-] Dbl Bogey+"
+			a.table.SetCell(tableRow, 0, tview.NewTableCell("").SetSelectable(false))
+			a.table.SetCell(tableRow, 1, tview.NewTableCell(legend).
+				SetExpansion(1).
+				SetSelectable(false))
+			for c := 2; c < numCols; c++ {
+				a.table.SetCell(tableRow, c, tview.NewTableCell("").SetSelectable(false))
+			}
+			tableRow++
+		}
 	}
 
 	a.table.ScrollToBeginning()
@@ -333,7 +450,7 @@ func (a *App) renderFooter() {
 	a.mu.Unlock()
 
 	footerText := fmt.Sprintf(
-		"[darkgray]Last updated: %s  |  [green]r[darkgray] refresh  |  [green]q/Esc[darkgray] quit  |  [green]↑↓[darkgray] scroll",
+		"[darkgray]Last updated: %s  |  [green]r[darkgray] refresh  |  [green]q/Esc[darkgray] quit  |  [green]↑↓[darkgray] scroll  |  [green]Enter[darkgray] scorecard",
 		lastFetch.Format("3:04:05 PM"),
 	)
 	a.footer.SetText(footerText)
@@ -351,4 +468,40 @@ func (a *App) renderError() {
 		"[darkgray]Last attempt: %s  |  [green]r[darkgray] retry  |  [green]q/Esc[darkgray] quit",
 		lastFetch.Format("3:04:05 PM"),
 	))
+}
+
+// formatHoleScore returns a formatted hole score decorated with
+// colored unicode indicators for the score relative to par:
+//
+//	◎3  eagle or better (red double circle)
+//	○3  birdie (red circle)
+//	·4  par (dot)
+//	□5  bogey (navy square)
+//	■6  double-bogey or worse (navy filled square)
+func formatHoleScore(score, toPar string) string {
+	if score == "" {
+		return "   -"
+	}
+	var prefix string
+	switch {
+	case toPar == "E" || toPar == "":
+		prefix = "·"
+	case strings.HasPrefix(toPar, "-"):
+		n, _ := strconv.Atoi(toPar)
+		if n <= -2 {
+			prefix = "[red]◎[-]" // eagle or better
+		} else {
+			prefix = "[red]○[-]" // birdie
+		}
+	case strings.HasPrefix(toPar, "+"):
+		n, _ := strconv.Atoi(toPar)
+		if n >= 2 {
+			prefix = "[navy]■[-]" // double-bogey+
+		} else {
+			prefix = "[navy]□[-]" // bogey
+		}
+	default:
+		prefix = "·"
+	}
+	return fmt.Sprintf(" %s%s", prefix, score)
 }
