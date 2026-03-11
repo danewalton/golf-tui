@@ -68,9 +68,9 @@ type Competition struct {
 
 // CompStatus contains competition status details.
 type CompStatus struct {
-	Period      int        `json:"period"`
-	Type        StatusType `json:"type"`
-	DisplayClock string   `json:"displayClock"`
+	Period       int        `json:"period"`
+	Type         StatusType `json:"type"`
+	DisplayClock string     `json:"displayClock"`
 }
 
 // Venue contains venue information.
@@ -87,23 +87,23 @@ type Address struct {
 
 // Competitor represents a golfer in the competition.
 type Competitor struct {
-	ID         string           `json:"id"`
-	UID        string           `json:"uid"`
+	ID         string            `json:"id"`
+	UID        string            `json:"uid"`
 	Status     *CompetitorStatus `json:"status,omitempty"`
-	Score      string           `json:"score"`
-	Athlete    Athlete          `json:"athlete"`
-	Order      int              `json:"order"`
-	SortOrder  int              `json:"sortOrder"`
-	Statistics []Statistic      `json:"statistics"`
-	Linescores []Linescore      `json:"linescores"`
-	Movement   int              `json:"movement"`
+	Score      string            `json:"score"`
+	Athlete    Athlete           `json:"athlete"`
+	Order      int               `json:"order"`
+	SortOrder  int               `json:"sortOrder"`
+	Statistics []Statistic       `json:"statistics"`
+	Linescores []Linescore       `json:"linescores"`
+	Movement   int               `json:"movement"`
 }
 
 // CompetitorStatus describes cut status, etc.
 type CompetitorStatus struct {
-	Period      int        `json:"period"`
-	Type        StatusType `json:"type"`
-	DisplayValue string   `json:"displayValue"`
+	Period       int        `json:"period"`
+	Type         StatusType `json:"type"`
+	DisplayValue string     `json:"displayValue"`
 }
 
 // Athlete contains golfer info.
@@ -123,13 +123,13 @@ type Flag struct {
 
 // Statistic holds a stat value (e.g., "toPar").
 type Statistic struct {
-	Name         string `json:"name"`
-	DisplayName  string `json:"displayName"`
-	ShortDisplayName string `json:"shortDisplayName"`
-	Description  string `json:"description"`
-	Abbreviation string `json:"abbreviation"`
-	Value        float64 `json:"value"`
-	DisplayValue string `json:"displayValue"`
+	Name             string  `json:"name"`
+	DisplayName      string  `json:"displayName"`
+	ShortDisplayName string  `json:"shortDisplayName"`
+	Description      string  `json:"description"`
+	Abbreviation     string  `json:"abbreviation"`
+	Value            float64 `json:"value"`
+	DisplayValue     string  `json:"displayValue"`
 }
 
 // FlexString handles JSON values that can be either a string or a number.
@@ -163,11 +163,16 @@ func (f FlexString) String() string {
 
 // Linescore represents one round score.
 type Linescore struct {
-	Period       int              `json:"period"`
-	Value        FlexString       `json:"value"`
-	DisplayValue string           `json:"displayValue"`
-	Linescores   []HoleLinescore  `json:"linescores"`
-	Statistics   json.RawMessage  `json:"statistics,omitempty"`
+	Period       int             `json:"period"`
+	Value        FlexString      `json:"value"`
+	DisplayValue string          `json:"displayValue"`
+	Linescores   []HoleLinescore `json:"linescores"`
+	Statistics   json.RawMessage `json:"statistics,omitempty"`
+}
+
+// ScoreType describes the score relative to par for a hole.
+type ScoreType struct {
+	DisplayValue string `json:"displayValue"`
 }
 
 // HoleLinescore represents a single hole score within a round.
@@ -175,32 +180,42 @@ type HoleLinescore struct {
 	Value        FlexString `json:"value"`
 	DisplayValue string     `json:"displayValue"`
 	Period       int        `json:"period"`
+	ScoreType    ScoreType  `json:"scoreType"`
+}
+
+// RoundScorecard holds hole-by-hole scores for a single round.
+type RoundScorecard struct {
+	Round      int
+	Scores     [18]string // index 0 = hole 1
+	ScoreToPar [18]string // e.g. "-1" birdie, "E" par, "+1" bogey
+	Total      string
 }
 
 // LeaderboardEntry is a simplified view of a competitor for display.
 type LeaderboardEntry struct {
-	Position    int
-	Name        string
-	Country     string
-	ToPar       string
-	TotalScore  string
-	Round1      string
-	Round2      string
-	Round3      string
-	Round4      string
+	Position     int
+	Name         string
+	Country      string
+	ToPar        string
+	TotalScore   string
+	Round1       string
+	Round2       string
+	Round3       string
+	Round4       string
 	CurrentRound string
-	Thru        string
-	Movement    string
-	Status      string
+	Thru         string
+	Movement     string
+	Status       string
+	RoundScores  []RoundScorecard
 }
 
 // TournamentInfo holds tournament metadata for display.
 type TournamentInfo struct {
-	Name      string
-	Venue     string
-	Location  string
-	Status    string
-	Round     int
+	Name       string
+	Venue      string
+	Location   string
+	Status     string
+	Round      int
 	EventState string
 }
 

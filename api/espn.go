@@ -186,6 +186,21 @@ func GetLeaderboard(data *models.ESPNResponse) []models.LeaderboardEntry {
 					entry.Thru = fmt.Sprintf("%d", holesPlayed)
 				}
 			}
+
+			// Collect hole-by-hole scorecard data
+			if len(ls.Linescores) > 0 {
+				sc := models.RoundScorecard{
+					Round: ls.Period,
+					Total: ls.Value.String(),
+				}
+				for _, hs := range ls.Linescores {
+					if hs.Period >= 1 && hs.Period <= 18 {
+						sc.Scores[hs.Period-1] = hs.Value.String()
+						sc.ScoreToPar[hs.Period-1] = hs.ScoreType.DisplayValue
+					}
+				}
+				entry.RoundScores = append(entry.RoundScores, sc)
+			}
 		}
 
 		// If no thru derived yet, check if they have all rounds completed
