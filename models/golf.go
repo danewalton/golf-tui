@@ -209,6 +209,14 @@ type LeaderboardEntry struct {
 	RoundScores  []RoundScorecard
 }
 
+// EventSummary holds a brief summary of a tournament for display in the picker.
+type EventSummary struct {
+	Index  int
+	Name   string
+	State  string // "pre", "in", "post"
+	Status string // "Upcoming", "In Progress", "Completed"
+}
+
 // TournamentInfo holds tournament metadata for display.
 type TournamentInfo struct {
 	Name       string
