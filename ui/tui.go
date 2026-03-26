@@ -19,20 +19,23 @@ const (
 
 // App holds all TUI components and state.
 type App struct {
-	app        *tview.Application
-	pages      *tview.Pages
-	table      *tview.Table
-	header     *tview.TextView
-	footer     *tview.TextView
-	layout     *tview.Flex
-	client     *api.Client
-	mu         sync.Mutex
-	info       models.TournamentInfo
-	entries    []models.LeaderboardEntry
-	lastFetch  time.Time
-	err        error
-	expanded   map[int]bool // which entry indices are expanded (scorecard visible)
-	rowToEntry map[int]int  // table row -> entry index (-1 for scorecard rows)
+	app             *tview.Application
+	pages           *tview.Pages
+	table           *tview.Table
+	header          *tview.TextView
+	footer          *tview.TextView
+	layout          *tview.Flex
+	client          *api.Client
+	mu              sync.Mutex
+	info            models.TournamentInfo
+	entries         []models.LeaderboardEntry
+	availableEvents []models.EventSummary // all events from the last fetch
+	selectedEventIdx int                  // which event to display
+	currentDate     string               // YYYYMMDD for a specific week, empty = current
+	lastFetch       time.Time
+	err             error
+	expanded        map[int]bool // which entry indices are expanded (scorecard visible)
+	rowToEntry      map[int]int  // table row -> entry index (-1 for scorecard rows)
 }
 
 // NewApp creates a new TUI application.
@@ -120,6 +123,9 @@ func (a *App) buildUI() {
 			case 'r':
 				go a.refreshData()
 				return nil
+			case 't':
+				a.showTournamentSelector()
+				return nil
 			}
 		case tcell.KeyEsc:
 			a.app.Stop()
@@ -155,7 +161,11 @@ func (a *App) autoRefresh() {
 
 // refreshData fetches data and updates the UI.
 func (a *App) refreshData() {
-	data, err := a.client.FetchScoreboard()
+	a.mu.Lock()
+	date := a.currentDate
+	a.mu.Unlock()
+
+	data, err := a.client.FetchScoreboard(date)
 
 	a.mu.Lock()
 	a.lastFetch = time.Now()
@@ -168,8 +178,12 @@ func (a *App) refreshData() {
 		return
 	}
 	a.err = nil
-	a.info = api.GetTournamentInfo(data)
-	a.entries = api.GetLeaderboard(data)
+	a.availableEvents = api.GetEventSummaries(data)
+	if a.selectedEventIdx >= len(data.Events) {
+		a.selectedEventIdx = 0
+	}
+	a.info = api.GetTournamentInfo(data, a.selectedEventIdx)
+	a.entries = api.GetLeaderboard(data, a.selectedEventIdx)
 	a.mu.Unlock()
 
 	a.app.QueueUpdateDraw(func() {
@@ -450,7 +464,7 @@ func (a *App) renderFooter() {
 	a.mu.Unlock()
 
 	footerText := fmt.Sprintf(
-		"[darkgray]Last updated: %s  |  [green]r[darkgray] refresh  |  [green]q/Esc[darkgray] quit  |  [green]↑↓[darkgray] scroll  |  [green]Enter[darkgray] scorecard",
+		"[darkgray]Updated: %s  |  [green]t[darkgray] tournaments  |  [green]r[darkgray] refresh  |  [green]q/Esc[darkgray] quit  |  [green]↑↓[darkgray] scroll  |  [green]Enter[darkgray] scorecard",
 		lastFetch.Format("3:04:05 PM"),
 	)
 	a.footer.SetText(footerText)
@@ -468,6 +482,133 @@ func (a *App) renderError() {
 		"[darkgray]Last attempt: %s  |  [green]r[darkgray] retry  |  [green]q/Esc[darkgray] quit",
 		lastFetch.Format("3:04:05 PM"),
 	))
+}
+
+// showTournamentSelector opens a modal list for picking a tournament.
+// It shows all events in the current fetch plus prev/next week navigation.
+func (a *App) showTournamentSelector() {
+	a.mu.Lock()
+	events := a.availableEvents
+	selectedIdx := a.selectedEventIdx
+	currentDate := a.currentDate
+	a.mu.Unlock()
+
+	list := tview.NewList().ShowSecondaryText(false)
+	list.SetBorder(true).
+		SetTitle(" Select Tournament ").
+		SetTitleColor(tcell.ColorGreen).
+		SetBorderColor(tcell.ColorDarkGreen)
+
+	for _, ev := range events {
+		ev := ev // capture loop variable
+		stateColor := "white"
+		switch ev.State {
+		case "in":
+			stateColor = "lime"
+		case "post":
+			stateColor = "gray"
+		case "pre":
+			stateColor = "cyan"
+		}
+		prefix := "   "
+		if ev.Index == selectedIdx {
+			prefix = "[green]▶[-] "
+		}
+		label := fmt.Sprintf("%s[%s]%s[-] [darkgray](%s)[-]", prefix, stateColor, ev.Name, ev.Status)
+		list.AddItem(label, "", 0, func() {
+			a.mu.Lock()
+			a.selectedEventIdx = ev.Index
+			a.expanded = make(map[int]bool)
+			a.mu.Unlock()
+			a.pages.RemovePage("tournament-selector")
+			a.app.SetFocus(a.table)
+			a.app.QueueUpdateDraw(func() {
+				a.renderHeader()
+				a.renderTable()
+			})
+		})
+	}
+
+	if len(events) > 0 {
+		list.AddItem("", "", 0, nil) // spacer
+	}
+	list.AddItem("[darkgray]◀  Previous Week[-]", "", 0, func() {
+		a.pages.RemovePage("tournament-selector")
+		a.app.SetFocus(a.table)
+		go a.navigateWeek(-1)
+	})
+	if currentDate != "" {
+		list.AddItem("[darkgray]▶  Next Week[-]", "", 0, func() {
+			a.pages.RemovePage("tournament-selector")
+			a.app.SetFocus(a.table)
+			go a.navigateWeek(1)
+		})
+	}
+
+	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			a.pages.RemovePage("tournament-selector")
+			a.app.SetFocus(a.table)
+			return nil
+		}
+		return event
+	})
+
+	// Size the modal to fit the content
+	listHeight := len(events) + 4 // events + spacer + nav + borders
+	if listHeight < 6 {
+		listHeight = 6
+	}
+	if listHeight > 22 {
+		listHeight = 22
+	}
+
+	modal := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(list, listHeight+2, 0, true).
+			AddItem(nil, 0, 1, false), 72, 0, true).
+		AddItem(nil, 0, 1, false)
+
+	a.pages.AddPage("tournament-selector", modal, true, true)
+	a.app.SetFocus(list)
+}
+
+// navigateWeek shifts the viewed week by delta (positive = forward, negative = back)
+// and refreshes data. When the resulting date reaches the current week, currentDate
+// is cleared so the live scoreboard is used.
+func (a *App) navigateWeek(delta int) {
+	a.mu.Lock()
+	currentDate := a.currentDate
+	a.mu.Unlock()
+
+	var refDate time.Time
+	if currentDate == "" {
+		refDate = time.Now()
+	} else {
+		var err error
+		refDate, err = time.Parse("20060102", currentDate)
+		if err != nil {
+			refDate = time.Now()
+		}
+	}
+
+	newDate := refDate.AddDate(0, 0, delta*7)
+	today := time.Now().Truncate(24 * time.Hour)
+
+	a.mu.Lock()
+	if !newDate.Truncate(24 * time.Hour).Before(today) {
+		// At or past today — show live current week
+		a.currentDate = ""
+	} else {
+		a.currentDate = newDate.Format("20060102")
+	}
+	a.selectedEventIdx = 0
+	a.expanded = make(map[int]bool)
+	a.mu.Unlock()
+
+	a.refreshData()
 }
 
 // formatHoleScore returns a formatted hole score decorated with

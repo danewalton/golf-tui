@@ -29,9 +29,14 @@ func NewClient() *Client {
 	}
 }
 
-// FetchScoreboard retrieves the current PGA Tour scoreboard from ESPN.
-func (c *Client) FetchScoreboard() (*models.ESPNResponse, error) {
-	resp, err := c.httpClient.Get(espnGolfScoreboardURL)
+// FetchScoreboard retrieves the PGA Tour scoreboard from ESPN.
+// date is an optional YYYYMMDD string; empty means the current week.
+func (c *Client) FetchScoreboard(date string) (*models.ESPNResponse, error) {
+	url := espnGolfScoreboardURL
+	if date != "" {
+		url += "?dates=" + date
+	}
+	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch scoreboard: %w", err)
 	}
@@ -54,8 +59,35 @@ func (c *Client) FetchScoreboard() (*models.ESPNResponse, error) {
 	return &data, nil
 }
 
+// GetEventSummaries returns a brief summary of every event in the response,
+// suitable for populating the tournament picker.
+func GetEventSummaries(data *models.ESPNResponse) []models.EventSummary {
+	summaries := make([]models.EventSummary, 0, len(data.Events))
+	for i, event := range data.Events {
+		status := ""
+		switch event.Status.Type.State {
+		case "pre":
+			status = "Upcoming"
+		case "in":
+			status = "In Progress"
+		case "post":
+			status = "Completed"
+		default:
+			status = event.Status.Type.Description
+		}
+		summaries = append(summaries, models.EventSummary{
+			Index:  i,
+			Name:   event.Name,
+			State:  event.Status.Type.State,
+			Status: status,
+		})
+	}
+	return summaries
+}
+
 // GetTournamentInfo extracts tournament metadata from the API response.
-func GetTournamentInfo(data *models.ESPNResponse) models.TournamentInfo {
+// eventIdx selects which event to read (0-based); if out of range the first is used.
+func GetTournamentInfo(data *models.ESPNResponse, eventIdx int) models.TournamentInfo {
 	info := models.TournamentInfo{
 		Name:       "No Active Tournament",
 		Venue:      "",
@@ -68,8 +100,11 @@ func GetTournamentInfo(data *models.ESPNResponse) models.TournamentInfo {
 	if len(data.Events) == 0 {
 		return info
 	}
+	if eventIdx < 0 || eventIdx >= len(data.Events) {
+		eventIdx = 0
+	}
 
-	event := data.Events[0]
+	event := data.Events[eventIdx]
 	info.Name = event.Name
 	info.EventState = event.Status.Type.State
 
@@ -103,14 +138,18 @@ func GetTournamentInfo(data *models.ESPNResponse) models.TournamentInfo {
 }
 
 // GetLeaderboard extracts and sorts the leaderboard from the API response.
-func GetLeaderboard(data *models.ESPNResponse) []models.LeaderboardEntry {
+// eventIdx selects which event to read (0-based); if out of range the first is used.
+func GetLeaderboard(data *models.ESPNResponse, eventIdx int) []models.LeaderboardEntry {
 	entries := []models.LeaderboardEntry{}
 
 	if len(data.Events) == 0 {
 		return entries
 	}
+	if eventIdx < 0 || eventIdx >= len(data.Events) {
+		eventIdx = 0
+	}
 
-	event := data.Events[0]
+	event := data.Events[eventIdx]
 	if len(event.Competitions) == 0 {
 		return entries
 	}
