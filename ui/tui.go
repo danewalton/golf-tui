@@ -644,5 +644,5 @@ func formatHoleScore(score, toPar string) string {
 	default:
 		prefix = "·"
 	}
-	return fmt.Sprintf(" %s%s", prefix, score)
+	return fmt.Sprintf(" %s%2s", prefix, score)
 }
