@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	refreshInterval = 60 * time.Second
+	refreshInterval   = 60 * time.Second
+	highlightDuration = 5 * time.Second
 )
 
 // App holds all TUI components and state.
@@ -34,8 +35,10 @@ type App struct {
 	currentDate     string               // YYYYMMDD for a specific week, empty = current
 	lastFetch       time.Time
 	err             error
-	expanded        map[int]bool // which entry indices are expanded (scorecard visible)
-	rowToEntry      map[int]int  // table row -> entry index (-1 for scorecard rows)
+	expanded        map[int]bool         // which entry indices are expanded (scorecard visible)
+	rowToEntry      map[int]int          // table row -> entry index (-1 for scorecard rows)
+	updatedAt       map[string]time.Time // player name -> time of last detected change
+	highlightTimer  *time.Timer          // single timer used to clear row highlights
 }
 
 // NewApp creates a new TUI application.
@@ -45,6 +48,7 @@ func NewApp() *App {
 		client:     api.NewClient(),
 		expanded:   make(map[int]bool),
 		rowToEntry: make(map[int]int),
+		updatedAt:  make(map[string]time.Time),
 	}
 	a.buildUI()
 	return a
@@ -183,7 +187,21 @@ func (a *App) refreshData() {
 		a.selectedEventIdx = 0
 	}
 	a.info = api.GetTournamentInfo(data, a.selectedEventIdx)
-	a.entries = api.GetLeaderboard(data, a.selectedEventIdx)
+	newEntries := api.GetLeaderboard(data, a.selectedEventIdx)
+	if len(a.entries) > 0 {
+		now := time.Now()
+		prevByName := make(map[string]models.LeaderboardEntry, len(a.entries))
+		for _, e := range a.entries {
+			prevByName[e.Name] = e
+		}
+		for _, ne := range newEntries {
+			prev, exists := prevByName[ne.Name]
+			if !exists || hasEntryChanged(prev, ne) {
+				a.updatedAt[ne.Name] = now
+			}
+		}
+	}
+	a.entries = newEntries
 	a.mu.Unlock()
 
 	a.app.QueueUpdateDraw(func() {
@@ -233,11 +251,23 @@ func (a *App) renderHeader() {
 	a.header.SetText(headerText)
 }
 
+// hasEntryChanged returns true when any visible leaderboard field differs between prev and next.
+func hasEntryChanged(prev, next models.LeaderboardEntry) bool {
+	return prev.Position != next.Position ||
+		prev.ToPar != next.ToPar ||
+		prev.TotalScore != next.TotalScore ||
+		prev.Thru != next.Thru
+}
+
 // renderTable updates the leaderboard table.
 func (a *App) renderTable() {
 	a.mu.Lock()
 	entries := a.entries
 	info := a.info
+	updatedAt := make(map[string]time.Time, len(a.updatedAt))
+	for k, v := range a.updatedAt {
+		updatedAt[k] = v
+	}
 	a.mu.Unlock()
 
 	a.table.Clear()
@@ -274,10 +304,18 @@ func (a *App) renderTable() {
 	}
 
 	// Data rows (with interleaved scorecard rows for expanded players)
+	anyHighlighted := false
 	tableRow := 1
 	for i, entry := range entries {
 		a.rowToEntry[tableRow] = i
 		col := 0
+
+		// Determine highlight background for recently updated entries
+		rowBg := tcell.ColorDefault
+		if t, ok := updatedAt[entry.Name]; ok && time.Since(t) < highlightDuration {
+			rowBg = tcell.NewRGBColor(60, 50, 0)
+			anyHighlighted = true
+		}
 
 		// Position
 		posColor := tcell.ColorWhite
@@ -288,6 +326,7 @@ func (a *App) renderTable() {
 		}
 		a.table.SetCell(tableRow, col, tview.NewTableCell(fmt.Sprintf("%d", entry.Position)).
 			SetTextColor(posColor).
+			SetBackgroundColor(rowBg).
 			SetAlign(tview.AlignCenter))
 		col++
 
@@ -300,12 +339,14 @@ func (a *App) renderTable() {
 		}
 		a.table.SetCell(tableRow, col, tview.NewTableCell(nameText).
 			SetTextColor(tcell.ColorWhite).
+			SetBackgroundColor(rowBg).
 			SetExpansion(1))
 		col++
 
 		// Country
 		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.Country).
 			SetTextColor(tcell.ColorLightGray).
+			SetBackgroundColor(rowBg).
 			SetAlign(tview.AlignCenter))
 		col++
 
@@ -320,12 +361,14 @@ func (a *App) renderTable() {
 		}
 		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.ToPar).
 			SetTextColor(toParColor).
+			SetBackgroundColor(rowBg).
 			SetAlign(tview.AlignCenter))
 		col++
 
 		// Total score
 		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.TotalScore).
 			SetTextColor(tcell.ColorWhite).
+			SetBackgroundColor(rowBg).
 			SetAlign(tview.AlignCenter))
 		col++
 
@@ -338,6 +381,7 @@ func (a *App) renderTable() {
 				}
 				a.table.SetCell(tableRow, col, tview.NewTableCell(rs).
 					SetTextColor(tcell.ColorLightGray).
+					SetBackgroundColor(rowBg).
 					SetAlign(tview.AlignCenter))
 				col++
 			}
@@ -350,6 +394,7 @@ func (a *App) renderTable() {
 		}
 		a.table.SetCell(tableRow, col, tview.NewTableCell(thru).
 			SetTextColor(tcell.ColorLightYellow).
+			SetBackgroundColor(rowBg).
 			SetAlign(tview.AlignCenter))
 		col++
 
@@ -364,6 +409,7 @@ func (a *App) renderTable() {
 		}
 		a.table.SetCell(tableRow, col, tview.NewTableCell(entry.Movement).
 			SetTextColor(movColor).
+			SetBackgroundColor(rowBg).
 			SetAlign(tview.AlignCenter))
 
 		tableRow++
@@ -454,6 +500,19 @@ func (a *App) renderTable() {
 		}
 	}
 
+	if anyHighlighted {
+		if a.highlightTimer != nil {
+			a.highlightTimer.Stop()
+		}
+		a.highlightTimer = time.AfterFunc(highlightDuration, func() {
+			a.app.QueueUpdateDraw(func() {
+				a.renderTable()
+			})
+		})
+	} else if a.highlightTimer != nil {
+		a.highlightTimer.Stop()
+		a.highlightTimer = nil
+	}
 	a.table.ScrollToBeginning()
 }
 
